@@ -2,12 +2,12 @@
 <html lang="ja">
 <head>
 <meta charset="utf-8" />
-<meta name="viewport" content="width=device=device-width, initial-scale=1" />
-<title>MHWilds フル装備シミュ（Web/CSV直読＋所持装飾品）</title>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>MHWilds 装備シミュ（Web/CSV直読＋所持装飾品）</title>
 <script src="https://cdn.jsdelivr.net/npm/papaparse@5.4.1/papaparse.min.js"></script>
 <style>
   :root { --bg:#0b0f14; --fg:#e6edf3; --muted:#9aa4ad; --accent:#5ac8fa; --ok:#22c55e; --bad:#ef4444; --card:#111720; }
-  html,body { margin:0; padding:0; background:var(--bg); color:var(--fg); font-family:system-ui,-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,Helvetica,Arial; }
+  html,body { margin:0; padding:0; background:var(--bg); color:var(--fg); font-family:system-ui,-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,Helvetica,Arial,"Noto Sans JP"; }
   header { padding:16px 20px; border-bottom:1px solid #1e2631; position:sticky; top:0; background:linear-gradient(180deg,var(--bg),rgba(11,15,20,.92)); backdrop-filter: blur(6px); z-index:2; }
   header h1 { margin:0; font-size:18px; }
   .row { display:flex; gap:10px; align-items:center; }
@@ -42,7 +42,7 @@
 <header>
   <div class="row">
     <div>
-      <h1>MHWilds フル装備シミュ（Web/CSV直読）</h1>
+      <h1>MHWilds 装備シミュ（Web/CSV直読）</h1>
       <div class="row" style="margin-top:8px;">
         <input id="sheetId" class="grow" placeholder="Google Sheet ID" />
         <button id="reload" class="btn">読込/更新</button>
@@ -112,16 +112,17 @@
         <label class="small muted">検索（名称 or スキル名）</label>
         <input id="ownedFilter" placeholder="例: 攻撃 or 攻撃珠" />
       </div>
-      <div class="row" style="align-items:flex-end;">
+      <div class="row" style="align-items:flex-end; flex-wrap:wrap;">
         <button id="resetOwned" class="btn bad">全リセット（0に）</button>
         <button id="exportOwned" class="btn">エクスポート（JSON）</button>
         <label class="btn">
           インポート（JSON/CSV）
           <input id="importOwned" type="file" accept=".json,.csv" hidden />
         </label>
+        <button id="maxOwned" class="btn ok">全部MAX</button>
       </div>
     </div>
-    <div class="small" style="margin-top:6px;">※ 所持数はブラウザに保存（localStorage）。シミュ側の「所持装飾品を計算に反映」をオンにすると、この数で制限されます。</div>
+    <div class="small" style="margin-top:6px;">※ 所持数はブラウザに保存（localStorage）。「所持装飾品を計算に反映」をオンで制限が効きます。</div>
     <hr class="sep" />
     <div id="ownedList" class="list"></div>
   </section>
@@ -136,15 +137,13 @@ const SHEETS = {
   decos: "decorations_ja",
   skills: "skills_ja",
   series: "series_bonus_ja",
-  skills_long: "skills_long",
-  // optional
-  talisman: "talisman_ja",
-  talisman_group: "talisman_group_ja",
+  // talisman系は後で拡張可
 };
 const PRIORITY_WEIGHT = {1:100, 2:10, 3:1};
 const LS_SHEET_ID = "mhw_sheet_id";
 const LS_USE_OWNED = "mhw_use_owned";
 const LS_OWNED_DECOS = "mhw_owned_decos";
+const DEFAULT_OWNED_MAX = 99; // ★「全部MAX」の基準。必要に応じて変更OK。
 
 function gsheetCsvUrl(sheetId, sheetName){
   return `https://docs.google.com/spreadsheets/d/${sheetId}/gviz/tq?tqx=out:csv&sheet=${encodeURIComponent(sheetName)}`;
@@ -393,7 +392,7 @@ function diffTargets(targets, have){
   return d;
 }
 
-// 無制限（従来）
+// 無制限
 function fillWithDecorationsUnlimited(slotPool, deficits, skill2decos){
   const slots = [...slotPool].sort((a,b)=>b-a);
   const assign = [];
@@ -435,7 +434,6 @@ function fillWithDecorationsOwned(slotPool, deficits, skill2decos, ownedMap){
       let placed = false;
       for (let i=0;i<slots.length;i++){
         const s = slots[i];
-        // 所持が残っていて、スロットに入る候補に限定
         const usable = cand.filter(d=> canFit(s, d.slot) && (owned[d.dname]||0) > 0);
         if (!usable.length) continue;
         const pick = usable[0];
@@ -443,8 +441,7 @@ function fillWithDecorationsOwned(slotPool, deficits, skill2decos, ownedMap){
         assign.push({ skill: sk, deco: pick.dname, slot: s, lv: use });
         need -= use;
         slots.splice(i,1);
-        // 在庫を1個消費（デコ1枠=1個）
-        owned[pick.dname] = (owned[pick.dname]||0) - 1;
+        owned[pick.dname] = (owned[pick.dname]||0) - 1; // 1枠=1個消費
         used[pick.dname] = (used[pick.dname]||0) + 1;
         placed = true;
         break;
@@ -457,11 +454,10 @@ function fillWithDecorationsOwned(slotPool, deficits, skill2decos, ownedMap){
 
 /** ===================== UI状態 ===================== **/
 const $ = (q)=>document.querySelector(q);
-const skillRoster = {};
+const skillRoster = {};   // { skillName: maxLv|null }
 let WIDX={}, AIDX={}, DIDX={}, SIDX={};
 let DecoCatalog=[];        // [{name, slot, skills}]
 let OwnedDecos = {};       // {name: count}
-
 const state = { picked:{}, priorities:{}, weapon:null };
 
 /** ===================== 初期化 ===================== **/
@@ -482,7 +478,7 @@ async function bootstrap(){
     await loadAndIndex(sheetIdInput.value.trim());
   };
 
-  // 所持装飾品の反映トグル
+  // 所持装飾品の反映トグル（既定は前回値／未設定はOFF）
   const useOwned = $("#useOwned");
   useOwned.checked = localStorage.getItem(LS_USE_OWNED) === "1";
   useOwned.onchange = ()=> localStorage.setItem(LS_USE_OWNED, useOwned.checked ? "1" : "0");
@@ -490,10 +486,14 @@ async function bootstrap(){
   // 所持装飾品のイベント
   $("#ownedFilter").oninput = ()=> renderOwnedList();
   $("#resetOwned").onclick = ()=>{ if (confirm("所持数を全て0にします。よろしいですか？")) { OwnedDecos = {}; saveOwnedDecos(OwnedDecos); renderOwnedList(); } };
-  $("#exportOwned").onclick = ()=>{
-    downloadText("owned_decorations.json", JSON.stringify(OwnedDecos, null, 2));
-  };
+  $("#exportOwned").onclick = ()=> downloadText("owned_decorations.json", JSON.stringify(OwnedDecos, null, 2));
   $("#importOwned").onchange = (e)=>{ const f=e.target.files?.[0]; if (f) importOwned(f); e.target.value=""; };
+  document.getElementById("maxOwned").onclick = ()=>{
+    if (!confirm("全装飾品の所持数をMAXにします。よろしいですか？")) return;
+    for (const d of DecoCatalog) OwnedDecos[d.name] = DEFAULT_OWNED_MAX;
+    saveOwnedDecos(OwnedDecos);
+    renderOwnedList();
+  };
 
   // スキル追加
   $("#addSkill").onclick = ()=>{
@@ -519,7 +519,7 @@ async function bootstrap(){
   // 実行
   $("#run").onclick = ()=> runSearch();
 
-  // 所持デコ読み込み
+  // 既存の所持データをロード
   OwnedDecos = loadOwnedDecos();
 
   // 初回ロード
@@ -538,7 +538,15 @@ async function loadAndIndex(sheetId){
     const d = buildDecoIndexes(dec);
     DIDX = d.s2d; DecoCatalog = d.catalog;
     SIDX = buildSeriesIndex(ser);
-    // UI
+
+    // ★ 初回のみ：所持装飾品をデフォルトMAXで初期化
+    if (!localStorage.getItem(LS_OWNED_DECOS)) {
+      OwnedDecos = {};
+      for (const deco of DecoCatalog) OwnedDecos[deco.name] = DEFAULT_OWNED_MAX;
+      saveOwnedDecos(OwnedDecos);
+    }
+
+    // UI描画
     renderSkillPicker();
     renderWeapons();
     renderOwnedList();
@@ -737,9 +745,7 @@ function runSearch(){
 }
 
 /** ===================== 起動 ===================== **/
-let DecoIndexesBuilt = false;
-const skillRosterDummy = {}; // not used further but kept for parity
-async function initialUI(){
+function initialUI(){
   // 初期描画の空UI
   const dl = $("#skillList"); dl.innerHTML="";
   $("#weaponSelect").innerHTML = `<option value="">（未選択）</option>`;
