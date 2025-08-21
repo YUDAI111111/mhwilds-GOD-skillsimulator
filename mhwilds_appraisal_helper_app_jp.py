@@ -2,10 +2,13 @@ import streamlit as st
 import pandas as pd
 from collections import defaultdict, Counter
 from itertools import product, islice
+from pathlib import Path
 import re
 
-st.set_page_config(page_title="MHWilds 補助シミュ（JP列名対応）", layout="wide")
-st.title("MHWilds 補助シミュレーター（護石提案）— JP列名自動対応版")
+st.set_page_config(page_title="MHWilds 補助シミュ（ビルトインDB＋護石提案）", layout="wide")
+st.title("MHWilds 補助シミュレーター（護石提案）— ビルトインDB同梱版")
+
+DATA_DIR = Path(__file__).parent / "data"  # ← リポジトリ内の data/ を参照
 
 # ---------- helpers ----------
 def to_int(x, default=0):
@@ -42,12 +45,6 @@ def slots_from_row(row, slot_cols=("slot1","slot2","slot3")):
     return [to_int(row.get(c,0)) for c in slot_cols if c in row]
 
 def collect_slots(wep_slots, gear_slots_list, charm_slot_tokens, weapon_l1_available):
-    """
-    wep_slots: [1/2/3/0,...]
-    gear_slots_list: [[...part slots...], ...]
-    charm_slot_tokens: ["W1","1","1"] etc
-    weapon_l1_available: count of Lv1 slots on weapon
-    """
     slot_counts = Counter()
     for s in wep_slots:
         if s in (1,2,3): slot_counts[s]+=1
@@ -69,11 +66,6 @@ def collect_slots(wep_slots, gear_slots_list, charm_slot_tokens, weapon_l1_avail
     return slot_counts
 
 def assign_decorations(required, decorations_df, slot_counts):
-    """
-    required: {skill: levels_needed}
-    decorations_df: columns [name,skill,lv,slot,count]
-    slot_counts: Counter {1:n1,2:n2,3:n3}
-    """
     filled = defaultdict(int)
     used = []
     pool = []
@@ -88,7 +80,7 @@ def assign_decorations(required, decorations_df, slot_counts):
     for d in pool:
         by_skill[d["skill"]].append(d)
     for k in by_skill:
-        by_skill[k].sort(key=lambda d: (d["slot"], -d["lv"]))  # 小さいスロ優先、同じならLv大
+        by_skill[k].sort(key=lambda d: (d["slot"], -d["lv"]))  # 小さいスロ優先、同Lvなら高Lv優先
     for skill, need in required.items():
         remain = need
         options = by_skill.get(skill, [])
@@ -169,41 +161,35 @@ def normalize_appraisal_df(df):
         df = df.rename(columns=mapping)
     return df
 
-# ---------- Sidebar Inputs ----------
-st.sidebar.header("データ読み込み（CSV）")
-weapons_file = st.sidebar.file_uploader("武器（name,slot1,slot2,slot3,skill1,lv1,skill2,lv2...）", type=["csv"])
-armor_file = st.sidebar.file_uploader("防具（name,part,skill1,lv1,skill2,lv2,slot1,slot2,slot3）", type=["csv"])
-charms_owned_file = st.sidebar.file_uploader("所持護石（name,skill1,lv1,skill2,lv2,slot1,slot2,slot3）", type=["csv"])
-decorations_file = st.sidebar.file_uploader("装飾品（name,skill,lv,slot,count）", type=["csv"])
-targets_file = st.sidebar.file_uploader("目標スキル（skill,target_level,priority）", type=["csv"])
-group_skills_file = st.sidebar.file_uploader("Group→スキル表（Group,Skill Name,Skill Level）", type=["csv"])
-appraisal_combos_file = st.sidebar.file_uploader("鑑定護石テーブル（rarity,g1,g2,g3,slots）", type=["csv"])
+# ---------- data loaders (built-in + override) ----------
+def read_csv_builtin(name):
+    path = DATA_DIR / name
+    if path.exists():
+        return pd.read_csv(path)
+    return pd.DataFrame()
 
-def load_or_empty(f):
-    return pd.read_csv(f) if f else pd.DataFrame()
+def use_or_override(builtin_df, uploader_label, hint):
+    up = st.sidebar.file_uploader(uploader_label, type=["csv"], help=hint)
+    if up:
+        df = pd.read_csv(up)
+        st.sidebar.caption(f"→ {uploader_label} は **アップロードで上書き中**")
+        return df
+    st.sidebar.caption(f"→ {uploader_label} は **ビルトインDB** を使用")
+    return builtin_df
 
-weapons_df = load_or_empty(weapons_file)
-armor_df = load_or_empty(armor_file)
-charms_df = load_or_empty(charms_owned_file)
-decor_df = load_or_empty(decorations_file)
-targets_df = load_or_empty(targets_file)
-group_df = load_or_empty(group_skills_file)
-ac_df = load_or_empty(appraisal_combos_file)
-
-if not len(group_df):
-    st.info("Group→スキル表が未指定：テンプレを推定して処理します（最小限）。")
-    group_df = pd.DataFrame([
-        {"Group":10,"Skill Name":"弱点特効","Skill Level":1},
-        {"Group":1,"Skill Name":"攻撃","Skill Level":1},
-        {"Group":2,"Skill Name":"攻撃","Skill Level":2},
-        {"Group":3,"Skill Name":"攻撃","Skill Level":3},
-        {"Group":4,"Skill Name":"超会心","Skill Level":1},
-    ])
+# ---- load all datasets ----
+weapons_df  = use_or_override(read_csv_builtin("weapons.csv"),  "武器CSV", "列: name, slot1, slot2, slot3, skill1, lv1, ...")
+armor_df    = use_or_override(read_csv_builtin("armor.csv"),    "防具CSV", "列: name, part, skill1, lv1, skill2, lv2, slot1, slot2, slot3")
+charms_df   = use_or_override(read_csv_builtin("charms_seed.csv"), "初期護石CSV（任意）", "列: name, skill1, lv1, skill2, lv2, slot1, slot2, slot3")
+decor_df    = use_or_override(read_csv_builtin("decorations.csv"), "装飾品CSV", "列: name, skill, lv, slot, count")
+targets_df  = use_or_override(read_csv_builtin("targets.csv"),  "目標スキルCSV", "列: skill, target_level, priority(1/2/3)")
+group_df    = use_or_override(read_csv_builtin("group_skills.csv"), "Group→スキルCSV", "列: Group, Skill Name, Skill Level")
+ac_df       = use_or_override(read_csv_builtin("appraisal_combos.csv"), "鑑定護石テーブルCSV", "列: rarity, g1, g2, g3, slots")
 
 group_df = normalize_group_df(group_df)
 ac_df = normalize_appraisal_df(ac_df)
 
-# Fallback samples for missing core tables
+# ---- minimal fallbacks if DBが空 ----
 def ensure_weapons(df):
     if len(df): return df
     return pd.DataFrame([{"name":"太刀","slot1":1,"slot2":0,"slot3":0,"skill1":"見切り","lv1":2}])
@@ -232,11 +218,11 @@ def ensure_targets(df):
     ])
 
 weapons_df = ensure_weapons(weapons_df)
-armor_df = ensure_armor(armor_df)
-decor_df = ensure_decor(decor_df)
+armor_df   = ensure_armor(armor_df)
+decor_df   = ensure_decor(decor_df)
 targets_df = ensure_targets(targets_df)
 
-# ---- manual selection ----
+# ---------- manual selection ----------
 st.sidebar.subheader("武器・装備の選択")
 weapon_name = st.sidebar.selectbox("武器", weapons_df["name"].tolist())
 sel_weapon = weapons_df[weapons_df["name"]==weapon_name].iloc[0].to_dict()
@@ -248,16 +234,16 @@ selected_gear = {}
 for p in parts:
     options = armor_df[armor_df["part"]==p]["name"].tolist()
     if not options:
-        st.sidebar.warning(f"{p} の装備がCSVにありません")
+        st.sidebar.warning(f"{p} の装備がDBにありません")
         continue
     choice = st.sidebar.selectbox(p, options, key=f"part_{p}")
     selected_gear[p] = armor_df[(armor_df['part']==p) & (armor_df['name']==choice)].iloc[0].to_dict()
 
-own_charm_opt = ["（未使用）"] + (charms_df["name"].tolist() if "name" in charms_df.columns else [])
+own_charm_opt = ["（未使用）"] + (charms_df["name"].tolist() if "name" in charms_df.columns and len(charms_df) else [])
 own_charm_name = st.sidebar.selectbox("護石（所持）", own_charm_opt)
 sel_own_charm = None if own_charm_name=="（未使用）" else charms_df[charms_df["name"]==own_charm_name].iloc[0].to_dict()
 
-# ---- base totals ----
+# ---------- base totals ----------
 base_skills = defaultdict(int)
 base_skills.update(sum_skills([sel_weapon], 3))
 for g in selected_gear.values():
@@ -269,7 +255,7 @@ if sel_own_charm:
         base_skills[k]+=v
     own_slots = slots_from_row(sel_own_charm)
 
-# ---- assign decos for owned charm case ----
+# ---------- assign decos (owned charm case) ----------
 req = {}
 for _, r in targets_df.iterrows():
     need = int(r["target_level"]) - int(base_skills.get(r["skill"],0))
@@ -296,10 +282,10 @@ with st.expander("所持護石での判定", expanded=True):
         else:
             st.success("所持護石で必須(P1)は満たせます")
 
-# ---- appraisal suggestion ----
+# ---------- appraisal suggestion ----------
 st.subheader("鑑定護石の提案（所持護石で不可のとき）")
 if not len(ac_df):
-    st.info("鑑定護石テーブルが未指定です（CSVでアップロードしてください）。")
+    st.info("鑑定護石テーブルがDBにありません（data/appraisal_combos.csv を用意するか、CSVをアップロードしてください）。")
 else:
     # Build group map
     group_map = defaultdict(list)
@@ -375,7 +361,7 @@ else:
     evaluated = []
     for c in cands:
         res = evaluate_with_candidate(c)
-        if res is None: 
+        if res is None:
             continue
         evaluated.append(res)
 
@@ -387,7 +373,7 @@ else:
 
     top_n = st.number_input("表示する提案数", min_value=1, max_value=50, value=10)
     if not evaluated:
-        st.info("鑑定護石候補なし（Group表・鑑定テーブルをご確認ください）")
+        st.info("護石候補なし")
     else:
         for i, r in enumerate(islice(evaluated, int(top_n))):
             with st.expander(f"提案#{i+1} | P1満たす: {'OK' if not r['hard_fail'] else 'NG'} | スコア: {r['score']} | cand技能: {r['skills_from_cand']} | スロット: {r['slot_tokens']}", expanded=(i==0)):
