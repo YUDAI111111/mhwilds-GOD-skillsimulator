@@ -38,4 +38,831 @@
   table { width:100%; border-collapse: collapse; }
   th, td { padding:6px 8px; border-bottom:1px solid #223047; font-size:13px; vertical-align: top; }
   th { text-align:left; color:#c7d2da; }
-  .tag { display:inline-block; padding:2px 6px; border:1px
+  .tag { display:inline-block; padding:2px 6px; border:1px solid #27405f; border-radius:6px; margin:0 6px 6px 0; font-size:12px; background:#0f1826; }
+  @media (max-width: 1100px) { .wrap { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="row">
+    <div>
+      <h1>MHWilds 装備シミュ（CSV直読・堅牢版）</h1>
+      <div class="row" style="margin-top:8px;">
+        <input id="sheetId" class="grow" placeholder="Google Sheet ID" />
+        <button id="reload" class="btn">読込/更新</button>
+        <span class="muted">例: 19dqfEFxbwie8HISr2QH7P1alkxErZWJiZ-8cBKHg4RI</span>
+      </div>
+      <nav class="tabs">
+        <button id="tab-sim" class="active">シミュレーター</button>
+        <button id="tab-owned">所持装飾品</button>
+      </nav>
+    </div>
+    <div class="grow"></div>
+    <div>
+      <label class="row">
+        <input type="checkbox" id="useOwned" />
+        <span>所持装飾品を計算に反映</span>
+      </label>
+      <div class="small muted">オンで在庫制限を適用（未オンは無制限）</div>
+    </div>
+  </div>
+</header>
+
+<!-- ====== シミュレーター ====== -->
+<main id="view-sim" class="wrap">
+  <!-- 左 -->
+  <section class="card">
+    <h2>① 欲しいスキルを選択</h2>
+    <div class="row">
+      <input list="skillList" id="skillPicker" placeholder="スキル名で検索" class="grow" />
+      <datalist id="skillList"></datalist>
+      <button id="addSkill" class="btn">追加</button>
+    </div>
+    <div id="pickedSkills" style="margin-top:8px;"></div>
+    <hr class="sep" />
+    <h2>② 武器を指定</h2>
+    <select id="weaponSelect" style="width:100%;"></select>
+    <div class="small" id="weaponMeta"></div>
+  </section>
+
+  <!-- 中央 -->
+  <section class="card">
+    <h2>③ 優先度（1=必須 / 2=下げ可 / 3=消して可）</h2>
+    <div id="priorityPanel" class="list"></div>
+    <hr class="sep" />
+    <h2>④ 検索</h2>
+    <button id="run" class="btn primary">この条件で検索する</button>
+    <div style="margin-top:8px;">
+      <label><input type="checkbox" id="optTryUpgrade" /> 余りスロで「指定スキル+1」を探索</label>
+    </div>
+  </section>
+
+  <!-- 右 -->
+  <section class="card">
+    <h2>⑤ 結果</h2>
+    <div id="result"></div>
+    <hr class="sep" />
+    <h2>⑥ 不成立時の提案</h2>
+    <div id="fallback"></div>
+  </section>
+</main>
+
+<!-- ====== 所持装飾品 ====== -->
+<main id="view-owned" class="wrap-full" style="display:none;">
+  <section class="card">
+    <h2>所持装飾品の管理</h2>
+    <div class="grid-2" style="margin-top:8px;">
+      <div>
+        <label class="small muted">検索（名称 or スキル名）</label>
+        <input id="ownedFilter" placeholder="例: 攻撃 or 攻撃珠" />
+      </div>
+      <div class="row" style="align-items:flex-end;">
+        <button id="resetOwned" class="btn bad">全リセット（0に）</button>
+        <button id="exportOwned" class="btn">エクスポート（JSON）</button>
+        <label class="btn">
+          インポート（JSON/CSV）
+          <input id="importOwned" type="file" accept=".json,.csv" hidden />
+        </label>
+        <button id="maxOwned" class="btn ok">全部MAX</button>
+      </div>
+    </div>
+    <div class="small" style="margin-top:6px;">在庫はブラウザ保存（localStorage）。「所持装飾品を計算に反映」をオンで適用。</div>
+    <hr class="sep" />
+    <div id="ownedList" class="list"></div>
+  </section>
+</main>
+
+<script>
+/** ===================== 設定 ===================== **/
+const DEFAULT_SHEET_ID = "19dqfEFxbwie8HISr2QH7P1alkxErZWJiZ-8cBKHg4RI";
+const SHEETS = {
+  weapons: "weapons_ja",
+  armor: "armor_ja",
+  decos: "decorations_ja",
+  skills: "skills_ja",
+  series: "series_bonus_ja",
+};
+const PRIORITY_WEIGHT = {1:100, 2:10, 3:1};
+const LS_SHEET_ID = "mhw_sheet_id";
+const LS_USE_OWNED = "mhw_use_owned";
+const LS_OWNED_DECOS = "mhw_owned_decos";
+const DEFAULT_OWNED_MAX = 99;
+
+const PART_ORDER = ["head","chest","arms","waist","legs"];
+const PART_JA = { head:"頭", chest:"胴", arms:"腕", waist:"腰", legs:"脚" };
+
+function gsheetCsvUrl(sheetId, sheetName){
+  return `https://docs.google.com/spreadsheets/d/${sheetId}/gviz/tq?tqx=out:csv&sheet=${encodeURIComponent(sheetName)}`;
+}
+
+/** ===================== ユーティリティ ===================== **/
+function parseSlots(text){
+  if (!text) return [];
+  const s = (''+text).trim();
+  if (!s) return [];
+  return s.split('-').map(t=>parseInt(t.trim(),10)).filter(n=>!isNaN(n));
+}
+function canFit(slotSize, decoSlot){
+  if (slotSize >= 3) return [1,2,3].includes(decoSlot);
+  if (slotSize == 2) return [1,2].includes(decoSlot);
+  return decoSlot === 1;
+}
+function normalizePartJaToKey(v){
+  const s = (v||'').toString().trim();
+  const map = {
+    "頭":"head","ヘッド":"head","Head":"head","頭装備":"head","頭防具":"head",
+    "胴":"chest","ボディ":"chest","Chest":"chest","胴装備":"chest",
+    "腕":"arms","アーム":"arms","Arms":"arms",
+    "腰":"waist","ウエスト":"waist","Waist":"waist",
+    "脚":"legs","レッグ":"legs","Legs":"legs"
+  };
+  return map[s] || '';
+}
+// 防具名から部位を推定（ヘルム/メイル/アーム/コイル/グリーヴ ほか）
+function inferPartFromName(name){
+  const n = (name||'').toString();
+  if (/(ヘルム|キャップ|クラウン|フード|マスク|サークレット|バンド|アイ|ヘッド)/.test(n)) return "head";
+  if (/(メイル|レジスト|ベスト|プレート|ジャケット|スーツ|チェスト|ネック|ボディ|胴)/.test(n)) return "chest";
+  if (/(アーム|グラブ|ガントレット|ヴァンブレイス|グローブ|ブレイス|腕)/.test(n)) return "arms";
+  if (/(コイル|ベルト|フォールド|スカート|腰)/.test(n)) return "waist";
+  if (/(グリーヴ|ブーツ|レガース|パンツ|ソックス|脚)/.test(n)) return "legs";
+  return "";
+}
+// 行の「列名ゆらぎ」を拾う
+function val(row, candidates){
+  const keys = Object.keys(row||{});
+  for (const want of candidates){
+    const w = (want||'').toString().trim();
+    for (const k of keys){
+      if ((k||'').toString().trim() === w) return row[k];
+    }
+  }
+  return "";
+}
+function toInt(x, def=0){ const n = parseInt(x,10); return isNaN(n) ? def : n; }
+function downloadText(filename, text){
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(new Blob([text], {type:"text/plain"}));
+  a.download = filename;
+  a.click();
+  URL.revokeObjectURL(a.href);
+}
+
+/** ===================== スキル抽出（堅牢） ===================== **/
+function extractSkillsFromRow(row, namePrefix){
+  const skills = {};
+  const keys = Object.keys(row||{});
+  const nameKeys = keys.filter(k => (k||'').toString().trim().startsWith(namePrefix) && !/(SL|Lv|レベル)\s*$/i.test((k||'').toString().trim()));
+  for (const nk of nameKeys){
+    const skName = (row[nk] || "").toString().trim();
+    if (!skName) continue;
+    const candLvKeys = [nk+" SL", nk+"SL", nk+"  SL", nk+" Lv", nk+"Lv", nk+" レベル"];
+    let lv = 0;
+    for (const lk of candLvKeys){
+      const hit = val(row, [lk]); // trim比較
+      if (hit !== "") { lv = toInt(hit, 0); break; }
+    }
+    if (lv <= 0) lv = 1; // フォールバック
+    skills[skName] = (skills[skName] || 0) + lv;
+  }
+  return skills;
+}
+
+/** ===================== データ読み込み ===================== **/
+async function loadCsv(url){
+  const res = await fetch(url, {cache:'no-store'});
+  const text = await res.text();
+  return new Promise((resolve)=>{
+    Papa.parse(text, { header:true, dynamicTyping:false, complete: (r)=>resolve(r.data) });
+  });
+}
+async function loadAll(sheetId){
+  const [wep, arm, dec, skl, ser] = await Promise.all([
+    loadCsv(gsheetCsvUrl(sheetId, SHEETS.weapons)),
+    loadCsv(gsheetCsvUrl(sheetId, SHEETS.armor)),
+    loadCsv(gsheetCsvUrl(sheetId, SHEETS.decos)),
+    loadCsv(gsheetCsvUrl(sheetId, SHEETS.skills)),
+    loadCsv(gsheetCsvUrl(sheetId, SHEETS.series)),
+  ]);
+  return {wep, arm, dec, skl, ser};
+}
+
+/** ===================== 索引構築 ===================== **/
+function buildSkillRoster(skl){
+  const out = {};
+  for (const r of skl||[]){
+    const name = val(r, ["スキル名","name","名称"]);
+    const mx = toInt(val(r, ["最大Lv","最大レベル","maxLv","max"]), null);
+    if (name) out[name] = (mx??null);
+  }
+  return out;
+}
+function buildWeaponIndex(wep){
+  const idx = {};
+  for (const r of wep||[]){
+    const name = val(r,["武器名","名称","name"]); if (!name) continue;
+    const slots = parseSlots(val(r,["スロット","slots"]));
+    const skills = extractSkillsFromRow(r, "武器スキル");
+    idx[name] = { slots, skills };
+  }
+  return idx;
+}
+function buildArmorIndex(arm){
+  const byPart = {head:[],chest:[],arms:[],waist:[],legs:[], _unknown:[]};
+  for (const r of arm||[]){
+    const name = val(r,["防具名","名称","name"]);
+    let partRaw = val(r,["部位","kind","部位名","部 位"]);
+    let part = normalizePartJaToKey(partRaw);
+    if (!part) part = inferPartFromName(name);
+    if (!name || !part){
+      byPart._unknown.push({ name, partRaw: (partRaw||"").toString() });
+      continue;
+    }
+    const slots = parseSlots(val(r,["スロット","slots"]));
+    const set_id = (val(r,["セットID","set_id","setId"]) || "").toString();
+    const skills = extractSkillsFromRow(r, "付与スキル");
+    byPart[part].push({ name, slots, skills, set_id, part });
+  }
+  return byPart;
+}
+function buildDecoIndexes(dec){
+  const s2d = {};
+  const catalog = [];
+  for (const r of dec||[]){
+    const name = val(r,["装飾品名","名称","name"]); const slot = toInt(val(r,["スロット","slot","slots"]), 0);
+    if (!name || !slot) continue;
+    const skills = extractSkillsFromRow(r, "付与スキル");
+    for (const [sk, lv] of Object.entries(skills)){
+      (s2d[sk] = s2d[sk] || []).push({ dname:name, slot, lv });
+    }
+    catalog.push({ name, slot, skills });
+  }
+  for (const sk of Object.keys(s2d)){
+    s2d[sk].sort((a,b)=> (a.slot-b.slot) || (b.lv - a.lv) || a.dname.localeCompare(b.dname));
+  }
+  catalog.sort((a,b)=> (a.slot-b.slot) || a.name.localeCompare(b.name));
+  return { s2d, catalog };
+}
+function buildSeriesIndex(ser){
+  const mp = {};
+  for (const r of ser||[]){
+    const sid = (val(r,["セットID","set_id","setId"])||"").toString();
+    const req = toInt(val(r,["必要部位数","required","count"]), 0);
+    const sk = val(r,["スキル名","name","skill"]);
+    const lv = toInt(val(r,["Lv","レベル","level"]), 0);
+    if (!sid || !sk || !lv) continue;
+    (mp[sid] = mp[sid] || []).push({ required:req, skill:sk, lv });
+  }
+  return mp;
+}
+
+/** ===================== 所持装飾品（在庫管理） ===================== **/
+function loadOwnedDecos(){
+  try{ return JSON.parse(localStorage.getItem(LS_OWNED_DECOS) || "{}"); }catch{ return {}; }
+}
+function saveOwnedDecos(map){ localStorage.setItem(LS_OWNED_DECOS, JSON.stringify(map||{})); }
+function renderOwnedList(){
+  const list = document.getElementById("ownedList");
+  const q = (document.getElementById("ownedFilter").value||"").trim().toLowerCase();
+  list.innerHTML="";
+  const frag = document.createDocumentFragment();
+  for (const d of DecoCatalog){
+    const skillsText = Object.entries(d.skills).map(([k,v])=>`${k}+${v}`).join(", ");
+    if (q){
+      const hit = d.name.toLowerCase().includes(q) || skillsText.toLowerCase().includes(q);
+      if (!hit) continue;
+    }
+    const row = document.createElement("div");
+    row.className="row"; row.style.marginBottom="8px";
+    const meta = document.createElement("div");
+    meta.className="grow small";
+    meta.innerHTML = `<span class="pill mono">${d.name}</span> <span class="pill">slot${d.slot}</span> <span class="muted">${skillsText||'-'}</span>`;
+    const input = document.createElement("input");
+    input.type="number"; input.min="0"; input.step="1"; input.className="qty";
+    input.value = OwnedDecos[d.name]||0;
+    input.onchange = ()=>{ OwnedDecos[d.name] = Math.max(0, parseInt(input.value||"0",10)||0); saveOwnedDecos(OwnedDecos); };
+    const plus = document.createElement("button"); plus.className="btn"; plus.textContent="+";
+    plus.onclick = ()=>{ input.value = (parseInt(input.value||"0",10)||0)+1; input.onchange(); };
+    const minus = document.createElement("button"); minus.className="btn"; minus.textContent="-";
+    minus.onclick = ()=>{ input.value = Math.max(0,(parseInt(input.value||"0",10)||0)-1); input.onchange(); };
+    row.appendChild(meta); row.appendChild(minus); row.appendChild(plus); row.appendChild(input);
+    frag.appendChild(row);
+  }
+  list.appendChild(frag);
+}
+function importOwned(file){
+  const reader = new FileReader();
+  reader.onload = () => {
+    try{
+      let map = {};
+      if (file.name.endsWith(".json")){
+        map = JSON.parse(reader.result);
+      }else{
+        const res = Papa.parse(reader.result, {header:true});
+        for (const r of res.data){
+          const name = r["装飾品名"] || r["name"] || r["装飾品"] || r["deco"] || "";
+          const n = parseInt(r["所持数"] || r["count"] || r["qty"] || "0", 10);
+          if (name) map[name]=Math.max(0, n||0);
+        }
+      }
+      OwnedDecos = map;
+      saveOwnedDecos(OwnedDecos);
+      renderOwnedList();
+      alert("所持装飾品をインポートしました。");
+    }catch(e){ alert("インポートに失敗しました: "+e.message); }
+  };
+  reader.readAsText(file);
+}
+
+/** ===================== コア計算 ===================== **/
+function greedyPickArmor(partsIndex, targets, priority){
+  const picked = [];
+  for (const part of PART_ORDER){
+    const cand = partsIndex[part] || [];
+    let best=null, bestScore=-1;
+    for (const p of cand){
+      let score = 0;
+      for (const sk of Object.keys(targets)){
+        const need = targets[sk];
+        const w = PRIORITY_WEIGHT[ priority[sk] || 1 ] || 1;
+        const gain = Math.min(need, p.skills[sk] || 0);
+        score += gain * w;
+      }
+      score += 0.01 * (p.slots.reduce((a,b)=>a+b,0));
+      if (score > bestScore){ bestScore=score; best=p; }
+    }
+    if (best) picked.push({...best, part});
+  }
+  return picked;
+}
+function combineSkills(dicts){
+  const out = {};
+  for (const d of dicts){
+    for (const [k,v] of Object.entries(d)) out[k]=(out[k]||0)+v;
+  }
+  return out;
+}
+function computeSeriesSkills(seriesIndex, pickedArmor){
+  const cnt = {};
+  for (const p of pickedArmor){
+    const sid = p.set_id; if (!sid) continue;
+    cnt[sid] = (cnt[sid]||0)+1;
+  }
+  const bonus = {};
+  for (const [sid,n] of Object.entries(cnt)){
+    for (const b of (seriesIndex[sid]||[])){
+      if (n >= b.required) bonus[b.skill] = (bonus[b.skill]||0)+b.lv;
+    }
+  }
+  return bonus;
+}
+function diffTargets(targets, have){
+  const d = {};
+  for (const [sk,need] of Object.entries(targets)){
+    const hv = have[sk]||0;
+    if (hv < need) d[sk] = need - hv;
+  }
+  return d;
+}
+function buildSlotPool(weaponName, weaponSlots, pickedArmor){
+  const pool = [];
+  weaponSlots.forEach((sz,i)=>{ pool.push({ size:sz, origin:"weapon", originName:(weaponName||"武器"), part:"weapon", slotNo:i+1 }); });
+  for (const p of pickedArmor){ p.slots.forEach((sz,i)=>{ pool.push({ size:sz, origin:"armor", originName:p.name, part:p.part, slotNo:i+1 }); }); }
+  return pool;
+}
+function fillWithDecorationsUnlimited(slotPool, deficits, skill2decos){
+  const slots = [...slotPool].sort((a,b)=>b.size-a.size);
+  const assign = [];
+  for (const [sk, need0] of Object.entries(deficits)){
+    let need = need0;
+    const cand = skill2decos[sk];
+    if (!cand) return { ok:false, assign, remain:slots, used:{} };
+    while (need > 0){
+      let placed = false;
+      for (let i=0;i<slots.length;i++){
+        const s = slots[i];
+        const usable = cand.filter(d=>canFit(s.size, d.slot));
+        if (!usable.length) continue;
+        const pick = usable[0];
+        const use = Math.min(need, pick.lv);
+        assign.push({ skill: sk, deco: pick.dname, slotSize: s.size, part: s.part, origin: s.originName, slotNo: s.slotNo, lv: use });
+        need -= use;
+        slots.splice(i,1);
+        placed = true;
+        break;
+      }
+      if (!placed) return { ok:false, assign, remain:slots, used:{} };
+    }
+  }
+  return { ok:true, assign, remain:slots, used:{} };
+}
+function fillWithDecorationsOwned(slotPool, deficits, skill2decos, ownedMap){
+  const slots = [...slotPool].sort((a,b)=>b.size-a.size);
+  const assign = [];
+  const owned = JSON.parse(JSON.stringify(ownedMap || {}));
+  const used = {};
+  for (const [sk, need0] of Object.entries(deficits)){
+    let need = need0;
+    const cand = skill2decos[sk];
+    if (!cand) return { ok:false, assign, remain:slots, used };
+    while (need > 0){
+      let placed = false;
+      for (let i=0;i<slots.length;i++){
+        const s = slots[i];
+        const usable = cand.filter(d=> canFit(s.size, d.slot) && (owned[d.dname]||0) > 0);
+        if (!usable.length) continue;
+        const pick = usable[0];
+        const use = Math.min(need, pick.lv);
+        assign.push({ skill: sk, deco: pick.dname, slotSize: s.size, part: s.part, origin: s.originName, slotNo: s.slotNo, lv: use });
+        need -= use;
+        slots.splice(i,1);
+        owned[pick.dname] = (owned[pick.dname]||0) - 1;
+        used[pick.dname] = (used[pick.dname]||0) + 1;
+        placed = true;
+        break;
+      }
+      if (!placed) return { ok:false, assign, remain:slots, used };
+    }
+  }
+  return { ok:true, assign, remain:slots, used };
+}
+
+/** ===================== 不足スキルの発生源ヒント ===================== **/
+function showDeficitHints(deficits){
+  const fb = document.getElementById("fallback");
+  const cont = document.createElement("div");
+  cont.innerHTML = `<div class="muted">不足スキルの発生源ヒント</div>`;
+  for (const [sk,need] of Object.entries(deficits)){
+    const hasDeco = !!DIDX[sk];
+    const tops = [];
+    for (const part of PART_ORDER){
+      const arr = (AIDX[part]||[])
+        .filter(p=> (p.skills[sk]||0)>0)
+        .sort((a,b)=> (b.skills[sk]||0) - (a.skills[sk]||0))
+        .slice(0,2);
+      arr.forEach(p=> tops.push(`${PART_JA[part]}:${p.name}(+${p.skills[sk]})`));
+    }
+    const d = document.createElement("div");
+    d.className="small";
+    d.textContent = `- ${sk}: 装飾品=${hasDeco?'あり':'なし'} ／ 代表防具: ${tops.slice(0,5).join(", ") || "該当なし"}`;
+    cont.appendChild(d);
+  }
+  fb.appendChild(cont);
+}
+
+/** ===================== UI状態 ===================== **/
+const $ = (q)=>document.querySelector(q);
+const skillRoster = {};
+let WIDX={}, AIDX={}, DIDX={}, SIDX={};
+let DecoCatalog=[];        // [{name, slot, skills}]
+let OwnedDecos = {};       // {name: count}
+const state = { picked:{}, priorities:{}, weapon:null };
+
+/** ===================== 初期化 ===================== **/
+async function bootstrap(){
+  // タブ
+  const tabSim = document.getElementById("tab-sim");
+  const tabOwned = document.getElementById("tab-owned");
+  const viewSim = document.getElementById("view-sim");
+  const viewOwned = document.getElementById("view-owned");
+  tabSim.onclick = ()=>{ tabSim.classList.add("active"); tabOwned.classList.remove("active"); viewSim.style.display="grid"; viewOwned.style.display="none"; };
+  tabOwned.onclick = ()=>{ tabOwned.classList.add("active"); tabSim.classList.remove("active"); viewSim.style.display="none"; viewOwned.style.display="block"; };
+
+  // シートID
+  const sheetIdInput = $("#sheetId");
+  sheetIdInput.value = localStorage.getItem(LS_SHEET_ID) || DEFAULT_SHEET_ID;
+  $("#reload").onclick = async ()=>{
+    localStorage.setItem(LS_SHEET_ID, sheetIdInput.value.trim());
+    await loadAndIndex(sheetIdInput.value.trim());
+  };
+
+  // 所持装飾品の反映トグル
+  const useOwned = $("#useOwned");
+  useOwned.checked = localStorage.getItem(LS_USE_OWNED) === "1";
+  useOwned.onchange = ()=> localStorage.setItem(LS_USE_OWNED, useOwned.checked ? "1" : "0");
+
+  // 所持装飾品のイベント
+  $("#ownedFilter").oninput = ()=> renderOwnedList();
+  $("#resetOwned").onclick = ()=>{ if (confirm("所持数を全て0にします。よろしいですか？")) { OwnedDecos = {}; saveOwnedDecos(OwnedDecos); renderOwnedList(); } };
+  $("#exportOwned").onclick = ()=> downloadText("owned_decorations.json", JSON.stringify(OwnedDecos, null, 2));
+  $("#importOwned").onchange = (e)=>{ const f=e.target.files?.[0]; if (f) importOwned(f); e.target.value=""; };
+  document.getElementById("maxOwned").onclick = ()=>{
+    if (!confirm("全装飾品の所持数をMAXにします。よろしいですか？")) return;
+    for (const d of DecoCatalog) OwnedDecos[d.name] = DEFAULT_OWNED_MAX;
+    saveOwnedDecos(OwnedDecos);
+    renderOwnedList();
+  };
+
+  // スキル追加
+  $("#addSkill").onclick = ()=>{
+    const name = $("#skillPicker").value.trim();
+    if (!name || !(name in skillRoster)) return;
+    if (!state.picked[name]) state.picked[name] = { target: Math.min(3, skillRoster[name]||3), max: (skillRoster[name]||null) };
+    if (!state.priorities[name]) state.priorities[name]=1;
+    $("#skillPicker").value="";
+    renderPicked(); renderPriorityPanel();
+  };
+
+  // 武器選択
+  $("#weaponSelect").onchange = ()=>{
+    const val = $("#weaponSelect").value;
+    state.weapon = val || null;
+    const meta = $("#weaponMeta"); meta.innerHTML="";
+    if (state.weapon){
+      const w = WIDX[state.weapon];
+      meta.innerHTML = `<div class="small">スロット: <span class="mono">${w.slots.join("-")||"-"}</span> ／ 武器スキル: ${Object.keys(w.skills).length? JSON.stringify(w.skills):"なし"}</div>`;
+    }
+  };
+
+  // 実行
+  $("#run").onclick = ()=> runSearch();
+
+  // 所持データをロード
+  OwnedDecos = loadOwnedDecos();
+
+  // 初回ロード
+  await loadAndIndex(sheetIdInput.value.trim());
+}
+
+async function loadAndIndex(sheetId){
+  const out = $("#result"); out.textContent="読み込み中...";
+  const fb = $("#fallback"); fb.textContent="";
+  try{
+    const {wep, arm, dec, skl, ser} = await loadAll(sheetId);
+    Object.assign(skillRoster, buildSkillRoster(skl));
+    WIDX = buildWeaponIndex(wep);
+    AIDX = buildArmorIndex(arm);
+    const d = buildDecoIndexes(dec);
+    DIDX = d.s2d; DecoCatalog = d.catalog;
+    SIDX = buildSeriesIndex(ser);
+
+    if (!localStorage.getItem(LS_OWNED_DECOS)) {
+      OwnedDecos = {};
+      for (const deco of DecoCatalog) OwnedDecos[deco.name] = DEFAULT_OWNED_MAX;
+      saveOwnedDecos(OwnedDecos);
+    }
+
+    renderSkillPicker();
+    renderWeapons();
+    renderOwnedList();
+
+    // 読み込みサマリ＋未知部位診断
+    const cnt = {
+      head: AIDX.head.length, chest: AIDX.chest.length, arms: AIDX.arms.length,
+      waist: AIDX.waist.length, legs: AIDX.legs.length, unknown: AIDX._unknown.length
+    };
+    out.innerHTML =
+      `データ読み込み完了。条件を指定して検索してください。<br>` +
+      `<span class="small muted">防具: 頭${cnt.head} 胴${cnt.chest} 腕${cnt.arms} 腰${cnt.waist} 脚${cnt.legs}（未分類:${cnt.unknown}） ／ `+
+      `武器: ${Object.keys(WIDX).length} ／ 装飾品: ${DecoCatalog.length}</span>`;
+
+    if (AIDX._unknown.length){
+      const warn = document.createElement("div");
+      warn.className="small";
+      const samples = AIDX._unknown.slice(0,5).map(u=>`[${u.partRaw||"??"}]${u.name||"(名称なし)"}`).join(", ");
+      warn.innerHTML = `未分類の防具が <b>${AIDX._unknown.length}</b> 件あります（部位列の表記ゆれ）。例: ${samples}`;
+      out.appendChild(warn);
+    }
+  }catch(e){
+    out.innerHTML = `<span class="error">データ読み込みでエラー: ${e?.message||e}</span>`;
+  }
+}
+
+/** ===================== 描画 ===================== **/
+function renderSkillPicker(){
+  const dl = $("#skillList");
+  dl.innerHTML = "";
+  Object.keys(skillRoster).sort().forEach(n=>{
+    const opt = document.createElement("option"); opt.value = n; dl.appendChild(opt);
+  });
+}
+function renderWeapons(){
+  const sel = $("#weaponSelect"); sel.innerHTML="";
+  const none = document.createElement("option"); none.value=""; none.textContent="（未選択）";
+  sel.appendChild(none);
+  Object.keys(WIDX).sort().forEach(n=>{
+    const op = document.createElement("option"); op.value=n; op.textContent=n; sel.appendChild(op);
+  });
+}
+function renderPicked(){
+  const box = $("#pickedSkills"); box.innerHTML="";
+  Object.entries(state.picked).forEach(([sk,info])=>{
+    const wrap = document.createElement("div");
+    wrap.className="row"; wrap.style.alignItems="center";
+    const label = document.createElement("div");
+    label.className="pill"; label.innerHTML = `<span>${sk}</span><span class="muted">max:${info.max??"?"}</span>`;
+    const input = document.createElement("input");
+    input.type="range"; input.min="1"; input.max=(info.max||10); input.value=info.target; input.className="grow";
+    input.oninput=()=>{ state.picked[sk].target = parseInt(input.value,10); renderPriorityPanel(); };
+    const num = document.createElement("span"); num.className="pill"; num.textContent = `Lv${info.target}`;
+    input.addEventListener("input", ()=> num.textContent = `Lv${input.value}`);
+    const del = document.createElement("button"); del.className="btn bad"; del.textContent="削除";
+    del.onclick=()=>{ delete state.picked[sk]; delete state.priorities[sk]; renderPicked(); renderPriorityPanel(); };
+    wrap.appendChild(label); wrap.appendChild(input); wrap.appendChild(num); wrap.appendChild(del);
+    box.appendChild(wrap);
+  });
+}
+function renderPriorityPanel(){
+  const box = $("#priorityPanel"); box.innerHTML="";
+  Object.keys(state.picked).forEach(sk=>{
+    const row = document.createElement("div"); row.className="row";
+    const lbl = document.createElement("div"); lbl.className="pill"; lbl.textContent=sk;
+    const sel = document.createElement("select");
+    [1,2,3].forEach(v=>{
+      const op = document.createElement("option"); op.value=v; op.textContent=v;
+      if ((state.priorities[sk]||1)===v) op.selected=true;
+      sel.appendChild(op);
+    });
+    sel.onchange=()=>{ state.priorities[sk]=parseInt(sel.value,10); };
+    row.appendChild(lbl); row.appendChild(sel);
+    box.appendChild(row);
+  });
+}
+
+/** ===================== 実行 ===================== **/
+function runSearch(){
+  const res = $("#result"); const fb = $("#fallback"); res.innerHTML=""; fb.innerHTML="";
+  const targets = {}; const prio = {};
+  Object.entries(state.picked).forEach(([sk,info])=> targets[sk]=info.target);
+  Object.entries(state.priorities).forEach(([sk,v])=> prio[sk]=v);
+
+  const weaponSlots = state.weapon ? WIDX[state.weapon].slots : [];
+  const weaponSkills = state.weapon ? WIDX[state.weapon].skills : {};
+
+  // 5部位選択
+  const picked = greedyPickArmor(AIDX, targets, prio);
+
+  // ====== 装備内訳テーブル ======
+  const tbl = document.createElement("table");
+  tbl.innerHTML = `<thead><tr>
+    <th style="width:80px;">部位</th><th>装備名</th><th style="width:110px;">スロット</th><th>対象スキル寄与</th>
+  </tr></thead><tbody></tbody>`;
+  const tbody = tbl.querySelector("tbody");
+  for (const part of PART_ORDER){
+    const row = document.createElement("tr");
+    const pick = picked.find(x=>x.part===part);
+    if (pick){
+      const contrib = Object.keys(targets)
+        .filter(sk=> (pick.skills[sk]||0) > 0)
+        .map(sk=> `<span class="tag">${sk}+${pick.skills[sk]}</span>`).join(" ");
+      row.innerHTML = `<td>${PART_JA[part]}</td>
+        <td>${pick.name}</td>
+        <td class="mono">${pick.slots.join('-')||'-'}</td>
+        <td>${contrib || '<span class="muted">-</span>'}</td>`;
+    }else{
+      row.innerHTML = `<td>${PART_JA[part]}</td><td class="muted">（未選）</td><td>-</td><td>-</td>`;
+    }
+    tbody.appendChild(row);
+  }
+  // 武器行
+  const wrow = document.createElement("tr");
+  wrow.innerHTML = `<td>武器</td>
+    <td>${state.weapon || '<span class="muted">（未選）</span>'}</td>
+    <td class="mono">${weaponSlots.join('-')||'-'}</td>
+    <td>${
+      Object.keys(weaponSkills).length
+        ? Object.entries(weaponSkills).map(([k,v])=>`<span class="tag">${k}+${v}</span>`).join(" ")
+        : '<span class="muted">-</span>'
+    }</td>`;
+  tbody.appendChild(wrow);
+  res.appendChild(tbl);
+
+  // 合算（素スキル+シリーズ）
+  const total = combineSkills([weaponSkills, ...picked.map(p=>p.skills)]);
+  const series = computeSeriesSkills(SIDX, picked);
+  for (const [k,v] of Object.entries(series)) total[k]=(total[k]||0)+v;
+
+  // スロットプール
+  const slotPool = buildSlotPool(state.weapon, weaponSlots, picked);
+
+  // 差分
+  const deficits = diffTargets(targets, total);
+
+  // 装飾品で充足
+  const useOwned = document.getElementById("useOwned").checked;
+  const filled = useOwned
+    ? fillWithDecorationsOwned(slotPool, deficits, DIDX, OwnedDecos)
+    : fillWithDecorationsUnlimited(slotPool, deficits, DIDX);
+
+  // シリーズ発動表示
+  if (Object.keys(series).length){
+    const d = document.createElement("div");
+    d.className="small"; d.textContent = `シリーズ発動: ${JSON.stringify(series)}`;
+    res.appendChild(d);
+  }
+  if (useOwned){
+    const d = document.createElement("div");
+    d.className="small muted"; d.textContent = "※ 所持装飾品制限を反映中";
+    res.appendChild(d);
+  }
+
+  // 結果表示
+  if (picked.length===0){
+    const warn = document.createElement("div");
+    warn.className="small error";
+    warn.textContent = "防具候補が0件です。armor_jaの「部位/スロット/付与スキル」列名や値の表記ゆれが原因の可能性があります。";
+    res.appendChild(warn);
+  }
+
+  if (filled.ok){
+    const ok = document.createElement("div");
+    ok.className="success"; ok.textContent="🎉 目標スキルを満たせました";
+    res.appendChild(ok);
+
+    const assignDiv = document.createElement("div");
+    assignDiv.innerHTML = `<div class="muted">装飾品アサイン（skill / deco / 部位・装備名 / slotサイズ / +lv）</div>`;
+    for (const a of filled.assign){
+      const line = document.createElement("div"); line.className="small mono";
+      const partLabel = a.part==="weapon" ? "武器" : (PART_JA[a.part] || a.part);
+      line.textContent = `- ${a.skill} / ${a.deco} / ${partLabel}:${a.origin} / slot${a.slotSize} / +${a.lv}`;
+      assignDiv.appendChild(line);
+    }
+    res.appendChild(assignDiv);
+
+    if (useOwned && Object.keys(filled.used||{}).length){
+      const u = document.createElement("div");
+      u.innerHTML = `<div class="muted">今回消費した所持装飾品</div>`;
+      for (const [nm,c] of Object.entries(filled.used)){
+        const d = document.createElement("div"); d.className="small mono";
+        d.textContent = `- ${nm}: ${c}個`;
+        u.appendChild(d);
+      }
+      res.appendChild(u);
+    }
+
+    if (document.getElementById("optTryUpgrade").checked){
+      const remain = filled.remain;
+      const upDiv = document.createElement("div");
+      upDiv.innerHTML = `<div class="muted">追加で盛れるか探索</div>`;
+      let found = false;
+      for (const sk of Object.keys(targets)){
+        const cur = (total[sk]||0) + filled.assign.filter(a=>a.skill===sk).reduce((s,a)=>s+a.lv,0);
+        const mx  = (skillRoster[sk] || 10);
+        if (cur < mx){
+          const tryAdd = useOwned
+            ? fillWithDecorationsOwned(remain, {[sk]:1}, DIDX, OwnedDecos)
+            : fillWithDecorationsUnlimited(remain, {[sk]:1}, DIDX);
+          if (tryAdd.ok && tryAdd.assign.length){
+            found = true;
+            const a = tryAdd.assign[0];
+            const partLabel = a.part==="weapon" ? "武器" : (PART_JA[a.part] || a.part);
+            const d = document.createElement("div"); d.className="small mono";
+            d.textContent = `- ${sk} / ${a.deco} / ${partLabel}:${a.origin} / slot${a.slotSize} / +${a.lv}`;
+            upDiv.appendChild(d);
+          }
+        }
+      }
+      if (!found){
+        const nd = document.createElement("div"); nd.className="small muted"; nd.textContent="追加候補は見つかりませんでした。";
+        upDiv.appendChild(nd);
+      }
+      res.appendChild(upDiv);
+    }
+
+  }else{
+    const bad = document.createElement("div");
+    bad.className="error"; bad.textContent="目標スキルを満たせませんでした。";
+    res.appendChild(bad);
+
+    const def = document.createElement("div");
+    def.className="small mono";
+    def.textContent = "不足: " + JSON.stringify(deficits);
+    res.appendChild(def);
+
+    if (useOwned && Object.keys(filled.used||{}).length){
+      const u = document.createElement("div");
+      u.innerHTML = `<div class="muted">今回消費できた所持装飾品（不足のため未達）</div>`;
+      for (const [nm,c] of Object.entries(filled.used)){
+        const d = document.createElement("div"); d.className="small mono";
+        d.textContent = `- ${nm}: ${c}個使用`;
+        u.appendChild(d);
+      }
+      res.appendChild(u);
+    }
+
+    const lowable = Object.entries(prio).filter(([sk,p])=> p>=2 && deficits[sk]).map(([sk])=>sk);
+    const w = document.createElement("div");
+    w.innerHTML = `<div class="muted">⑥-1 提案：優先度2/3のスキルを下げると成立する可能性あり</div>
+                   <div class="small mono">下げ候補: ${lowable.length? lowable.join(", ") : "該当なし"}</div>`;
+    fb.appendChild(w);
+
+    const t = document.createElement("div");
+    t.className="small muted";
+    t.textContent = "⑥-2 鑑定護石提案：シートが用意されていれば拡張可能（本MVPは省略）";
+    fb.appendChild(t);
+
+    if (Object.keys(deficits).length) showDeficitHints(deficits);
+  }
+}
+
+/** ===================== 起動 ===================== **/
+function initialUI(){
+  const dl = $("#skillList"); dl.innerHTML="";
+  $("#weaponSelect").innerHTML = `<option value="">（未選択）</option>`;
+}
+initialUI();
+bootstrap();
+</script>
+</body>
+</html>
