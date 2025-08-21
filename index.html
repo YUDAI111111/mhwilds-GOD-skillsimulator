@@ -10,7 +10,7 @@
   html,body { margin:0; padding:0; background:var(--bg); color:var(--fg); font-family:system-ui,-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,Helvetica,Arial,"Noto Sans JP"; }
   header { padding:16px 20px; border-bottom:1px solid #1e2631; position:sticky; top:0; background:linear-gradient(180deg,var(--bg),rgba(11,15,20,.92)); backdrop-filter: blur(6px); z-index:2; }
   header h1 { margin:0; font-size:18px; }
-  .row { display:flex; gap:10px; align-items:center; }
+  .row { display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
   .grow { flex:1; }
   .muted { color:var(--muted); }
   .pill { display:inline-flex; align-items:center; gap:6px; background:#111b28; border:1px solid #233047; border-radius:999px; padding:4px 9px; font-size:12px; margin:0 8px 0 0; }
@@ -35,6 +35,7 @@
   hr.sep { border:0; border-top:1px solid #223047; margin:12px 0; }
   .grid-2 { display:grid; grid-template-columns: 1fr 1fr; gap:12px; }
   .qty { width:80px; text-align:right; }
+  @media (max-width: 1100px) { .wrap { grid-template-columns: 1fr; } }
 </style>
 </head>
 <body>
@@ -112,7 +113,7 @@
         <label class="small muted">検索（名称 or スキル名）</label>
         <input id="ownedFilter" placeholder="例: 攻撃 or 攻撃珠" />
       </div>
-      <div class="row" style="align-items:flex-end; flex-wrap:wrap;">
+      <div class="row" style="align-items:flex-end;">
         <button id="resetOwned" class="btn bad">全リセット（0に）</button>
         <button id="exportOwned" class="btn">エクスポート（JSON）</button>
         <label class="btn">
@@ -137,13 +138,12 @@ const SHEETS = {
   decos: "decorations_ja",
   skills: "skills_ja",
   series: "series_bonus_ja",
-  // talisman系は後で拡張可
 };
 const PRIORITY_WEIGHT = {1:100, 2:10, 3:1};
 const LS_SHEET_ID = "mhw_sheet_id";
 const LS_USE_OWNED = "mhw_use_owned";
 const LS_OWNED_DECOS = "mhw_owned_decos";
-const DEFAULT_OWNED_MAX = 99; // ★「全部MAX」の基準。必要に応じて変更OK。
+const DEFAULT_OWNED_MAX = 99; // 全部MAXの基準値
 
 function gsheetCsvUrl(sheetId, sheetName){
   return `https://docs.google.com/spreadsheets/d/${sheetId}/gviz/tq?tqx=out:csv&sheet=${encodeURIComponent(sheetName)}`;
@@ -177,6 +177,26 @@ function downloadText(filename, text){
   a.download = filename;
   a.click();
   URL.revokeObjectURL(a.href);
+}
+
+/** ===================== スキル抽出（堅牢） ===================== **/
+// 付与スキル1 / 付与スキル1 SL, Lv, レベル などの表記ゆれを吸収
+function extractSkillsFromRow(row, namePrefix){
+  const skills = {};
+  const keys = Object.keys(row);
+  const nameKeys = keys.filter(k => k.startsWith(namePrefix) && !/(SL|Lv|レベル)\s*$/i.test(k.trim()));
+  for (const nk of nameKeys){
+    const skName = (row[nk] || "").toString().trim();
+    if (!skName) continue;
+    const candLvKeys = [nk+" SL", nk+"SL", nk+"  SL", nk+" Lv", nk+"Lv", nk+" レベル"];
+    let lv = 0;
+    for (const lk of candLvKeys){
+      if (lk in row) { lv = toInt(row[lk], 0); break; }
+    }
+    if (lv <= 0) lv = 1; // 最低1でフォールバック（Lv列欠落対策）
+    skills[skName] = (skills[skName] || 0) + lv;
+  }
+  return skills;
 }
 
 /** ===================== データ読み込み ===================== **/
@@ -213,13 +233,7 @@ function buildWeaponIndex(wep){
   for (const r of wep){
     const name = r["武器名"]; if (!name) continue;
     const slots = parseSlots(r["スロット"]);
-    const skills = {};
-    for (const k of Object.keys(r)){
-      if (k.startsWith("武器スキル") && !k.endsWith("SL")){
-        const lv = toInt(r[k + " SL"], 0);
-        if (r[k] && lv>0) skills[r[k]] = (skills[r[k]]||0)+lv;
-      }
-    }
+    const skills = extractSkillsFromRow(r, "武器スキル");
     idx[name] = { slots, skills };
   }
   return idx;
@@ -230,36 +244,22 @@ function buildArmorIndex(arm){
     const name = r["防具名"]; const part = normalizePartJaToKey(r["部位"]);
     if (!name || !part) continue;
     const slots = parseSlots(r["スロット"]);
-    const set_id = r["セットID"] || "";
-    const skills = {};
-    for (const k of Object.keys(r)){
-      if (k.startsWith("付与スキル") && !k.endsWith("SL")){
-        const lv = toInt(r[k + " SL"], 0);
-        if (r[k] && lv>0) skills[r[k]] = (skills[r[k]]||0)+lv;
-      }
-    }
+    const set_id = (r["セットID"] || "").toString();
+    const skills = extractSkillsFromRow(r, "付与スキル");
     byPart[part].push({ name, slots, skills, set_id });
   }
   return byPart;
 }
 function buildDecoIndexes(dec){
-  // s2d: skill -> [{dname, slot, lv}]
-  // catalog: [{name, slot, skills:{}}]  … 所持管理UI用
   const s2d = {};
   const catalog = [];
   for (const r of dec){
     const name = r["装飾品名"]; const slot = toInt(r["スロット"], 0);
     if (!name || !slot) continue;
-    const skills = {};
-    for (const k of Object.keys(r)){
-      if (k.startsWith("付与スキル") && !k.endsWith("SL")){
-        const sk = r[k]; const lv = toInt(r[k + " SL"], 0);
-        if (sk && lv>0){
-          skills[sk] = (skills[sk]||0)+lv;
-          s2d[sk] = s2d[sk] || [];
-          s2d[sk].push({ dname:name, slot, lv });
-        }
-      }
+    const skills = extractSkillsFromRow(r, "付与スキル");
+    for (const [sk, lv] of Object.entries(skills)){
+      s2d[sk] = s2d[sk] || [];
+      s2d[sk].push({ dname:name, slot, lv });
     }
     catalog.push({ name, slot, skills });
   }
@@ -323,7 +323,6 @@ function importOwned(file){
       if (file.name.endsWith(".json")){
         map = JSON.parse(reader.result);
       }else{
-        // CSV: headers: 装飾品名,所持数  or name,count
         const res = Papa.parse(reader.result, {header:true});
         for (const r of res.data){
           const name = r["装飾品名"] || r["name"] || r["装飾品"] || r["deco"] || "";
@@ -424,8 +423,8 @@ function fillWithDecorationsUnlimited(slotPool, deficits, skill2decos){
 function fillWithDecorationsOwned(slotPool, deficits, skill2decos, ownedMap){
   const slots = [...slotPool].sort((a,b)=>b-a);
   const assign = [];
-  const owned = JSON.parse(JSON.stringify(ownedMap || {})); // clone
-  const used = {}; // deco_name -> count used
+  const owned = JSON.parse(JSON.stringify(ownedMap || {}));
+  const used = {};
   for (const [sk, need0] of Object.entries(deficits)){
     let need = need0;
     const cand = skill2decos[sk];
@@ -441,7 +440,7 @@ function fillWithDecorationsOwned(slotPool, deficits, skill2decos, ownedMap){
         assign.push({ skill: sk, deco: pick.dname, slot: s, lv: use });
         need -= use;
         slots.splice(i,1);
-        owned[pick.dname] = (owned[pick.dname]||0) - 1; // 1枠=1個消費
+        owned[pick.dname] = (owned[pick.dname]||0) - 1;
         used[pick.dname] = (used[pick.dname]||0) + 1;
         placed = true;
         break;
@@ -452,9 +451,32 @@ function fillWithDecorationsOwned(slotPool, deficits, skill2decos, ownedMap){
   return { ok:true, assign, remain:slots, used };
 }
 
+/** ===================== 不足スキルの発生源ヒント ===================== **/
+function showDeficitHints(deficits){
+  const fb = document.getElementById("fallback");
+  const cont = document.createElement("div");
+  cont.innerHTML = `<div class="muted">不足スキルの発生源ヒント</div>`;
+  for (const [sk,need] of Object.entries(deficits)){
+    const hasDeco = !!DIDX[sk];
+    const tops = [];
+    for (const part of ["head","chest","arms","waist","legs"]){
+      const arr = (AIDX[part]||[])
+        .filter(p=> (p.skills[sk]||0)>0)
+        .sort((a,b)=> (b.skills[sk]||0) - (a.skills[sk]||0))
+        .slice(0,2);
+      arr.forEach(p=> tops.push(`${p.name}(+${p.skills[sk]})`));
+    }
+    const d = document.createElement("div");
+    d.className="small";
+    d.textContent = `- ${sk}: 装飾品=${hasDeco?'あり':'なし'} ／ 代表防具: ${tops.slice(0,5).join(", ") || "該当なし"}`;
+    cont.appendChild(d);
+  }
+  fb.appendChild(cont);
+}
+
 /** ===================== UI状態 ===================== **/
 const $ = (q)=>document.querySelector(q);
-const skillRoster = {};   // { skillName: maxLv|null }
+const skillRoster = {};
 let WIDX={}, AIDX={}, DIDX={}, SIDX={};
 let DecoCatalog=[];        // [{name, slot, skills}]
 let OwnedDecos = {};       // {name: count}
@@ -539,7 +561,7 @@ async function loadAndIndex(sheetId){
     DIDX = d.s2d; DecoCatalog = d.catalog;
     SIDX = buildSeriesIndex(ser);
 
-    // ★ 初回のみ：所持装飾品をデフォルトMAXで初期化
+    // 初回のみ：所持装飾品をデフォルトMAXで初期化
     if (!localStorage.getItem(LS_OWNED_DECOS)) {
       OwnedDecos = {};
       for (const deco of DecoCatalog) OwnedDecos[deco.name] = DEFAULT_OWNED_MAX;
@@ -550,7 +572,16 @@ async function loadAndIndex(sheetId){
     renderSkillPicker();
     renderWeapons();
     renderOwnedList();
-    out.textContent = "データ読み込み完了。条件を指定して検索してください。";
+
+    // 読み込みサマリ
+    const cnt = {
+      head: AIDX.head.length, chest: AIDX.chest.length, arms: AIDX.arms.length,
+      waist: AIDX.waist.length, legs: AIDX.legs.length
+    };
+    out.innerHTML =
+      `データ読み込み完了。条件を指定して検索してください。<br>` +
+      `<span class="small muted">防具件数: 頭${cnt.head} 胴${cnt.chest} 腕${cnt.arms} 腰${cnt.waist} 脚${cnt.legs} ／ `+
+      `武器: ${Object.keys(WIDX).length} ／ 装飾品: ${DecoCatalog.length}</span>`;
   }catch(e){
     out.innerHTML = `<span class="error">データ読み込みでエラー: ${e?.message||e}</span>`;
   }
@@ -620,6 +651,23 @@ function runSearch(){
   // 5部位Greedy
   const picked = greedyPickArmor(AIDX, targets, prio);
 
+  // 表示のベース
+  const list = document.createElement("div");
+  list.innerHTML = `<div class="muted">選択防具（Greedy）</div>`;
+  picked.forEach(p=>{
+    const d = document.createElement("div");
+    d.className="small mono";
+    d.textContent = `- ${p.name}  slots=${p.slots.join('-')||'-'}  skills=${JSON.stringify(p.skills)}  set=${p.set_id||''}`;
+    list.appendChild(d);
+  });
+  if (!picked.length){
+    const warn = document.createElement("div");
+    warn.className = "small error";
+    warn.textContent = "防具候補が0件です。armor_jaのヘッダーや部位名の取り込みに失敗している可能性があります。";
+    list.appendChild(warn);
+  }
+  res.appendChild(list);
+
   // 合算
   let allSlots = [...wslots];
   for (const p of picked) allSlots.push(...p.slots);
@@ -634,27 +682,17 @@ function runSearch(){
     ? fillWithDecorationsOwned(allSlots, deficits, DIDX, OwnedDecos)
     : fillWithDecorationsUnlimited(allSlots, deficits, DIDX);
 
-  // 表示
-  const list = document.createElement("div");
-  list.innerHTML = `<div class="muted">選択防具（Greedy）</div>`;
-  picked.forEach(p=>{
-    const d = document.createElement("div");
-    d.className="small mono";
-    d.textContent = `- ${p.name}  slots=${p.slots.join('-')||'-'}  skills=${JSON.stringify(p.skills)}  set=${p.set_id||''}`;
-    list.appendChild(d);
-  });
   if (Object.keys(ser).length){
     const d = document.createElement("div");
     d.className="small"; d.textContent = `シリーズ発動: ${JSON.stringify(ser)}`;
-    list.appendChild(d);
+    res.appendChild(d);
   }
   if (useOwned){
     const d = document.createElement("div");
     d.className="small muted";
     d.textContent = "※ 所持装飾品制限を反映中";
-    list.appendChild(d);
+    res.appendChild(d);
   }
-  res.appendChild(list);
 
   if (filled.ok){
     const ok = document.createElement("div");
@@ -742,11 +780,13 @@ function runSearch(){
     t.textContent = "⑥-2 鑑定護石提案：シートが用意されていれば拡張可能（本MVPは省略）";
     document.getElementById("fallback").appendChild(t);
   }
+
+  // ★ 不足スキルの発生源ヒントを最後に出す
+  if (Object.keys(deficits).length) showDeficitHints(deficits);
 }
 
 /** ===================== 起動 ===================== **/
 function initialUI(){
-  // 初期描画の空UI
   const dl = $("#skillList"); dl.innerHTML="";
   $("#weaponSelect").innerHTML = `<option value="">（未選択）</option>`;
 }
