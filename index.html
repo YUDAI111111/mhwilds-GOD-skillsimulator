@@ -3,10 +3,10 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>MHWilds 装備シミュ（装備内訳＆所持装飾品対応・堅牢取り込み）</title>
+<title>MHWilds 装備シミュ（合計スキル＆オーバーフロー表示）</title>
 <script src="https://cdn.jsdelivr.net/npm/papaparse@5.4.1/papaparse.min.js"></script>
 <style>
-  :root { --bg:#0b0f14; --fg:#e6edf3; --muted:#9aa4ad; --accent:#5ac8fa; --ok:#22c55e; --bad:#ef4444; --card:#111720; }
+  :root { --bg:#0b0f14; --fg:#e6edf3; --muted:#9aa4ad; --accent:#5ac8fa; --ok:#22c55e; --bad:#ef4444; --warn:#f59e0b; --card:#111720; }
   html,body { margin:0; padding:0; background:var(--bg); color:var(--fg); font-family:system-ui,-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,Helvetica,Arial,"Noto Sans JP"; }
   header { padding:16px 20px; border-bottom:1px solid #1e2631; position:sticky; top:0; background:linear-gradient(180deg,var(--bg),rgba(11,15,20,.92)); backdrop-filter: blur(6px); z-index:2; }
   header h1 { margin:0; font-size:18px; }
@@ -27,11 +27,13 @@
   .wrap-full { padding:16px; }
   .card { background:var(--card); border:1px solid #1e2631; border-radius:14px; padding:14px; }
   h2 { margin:0 0 10px; font-size:16px; }
+  h3 { margin:8px 0 6px; font-size:14px; }
   .list { max-height: 300px; overflow:auto; padding-right:6px; }
   .small { font-size:12px; color:var(--muted); }
   .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace; }
   .success { color: var(--ok); font-weight:600; }
   .error { color: var(--bad); font-weight:600; }
+  .warn { color: var(--warn); font-weight:600; }
   hr.sep { border:0; border-top:1px solid #223047; margin:12px 0; }
   .grid-2 { display:grid; grid-template-columns: 1fr 1fr; gap:12px; }
   .qty { width:80px; text-align:right; }
@@ -39,6 +41,9 @@
   th, td { padding:6px 8px; border-bottom:1px solid #223047; font-size:13px; vertical-align: top; }
   th { text-align:left; color:#c7d2da; }
   .tag { display:inline-block; padding:2px 6px; border:1px solid #27405f; border-radius:6px; margin:0 6px 6px 0; font-size:12px; background:#0f1826; }
+  .overcap { color: var(--bad); font-weight:700; }
+  .overtarget { color: var(--warn); font-weight:700; }
+  details summary { cursor:pointer; user-select:none; }
   @media (max-width: 1100px) { .wrap { grid-template-columns: 1fr; } }
 </style>
 </head>
@@ -47,7 +52,7 @@
 <header>
   <div class="row">
     <div>
-      <h1>MHWilds 装備シミュ（CSV直読・堅牢版）</h1>
+      <h1>MHWilds 装備シミュ（CSV直読・在庫対応・合計/オーバーフロー表示）</h1>
       <div class="row" style="margin-top:8px;">
         <input id="sheetId" class="grow" placeholder="Google Sheet ID" />
         <button id="reload" class="btn">読込/更新</button>
@@ -179,7 +184,6 @@ function normalizePartJaToKey(v){
   };
   return map[s] || '';
 }
-// 防具名から部位を推定（ヘルム/メイル/アーム/コイル/グリーヴ ほか）
 function inferPartFromName(name){
   const n = (name||'').toString();
   if (/(ヘルム|キャップ|クラウン|フード|マスク|サークレット|バンド|アイ|ヘッド)/.test(n)) return "head";
@@ -189,7 +193,6 @@ function inferPartFromName(name){
   if (/(グリーヴ|ブーツ|レガース|パンツ|ソックス|脚)/.test(n)) return "legs";
   return "";
 }
-// 行の「列名ゆらぎ」を拾う
 function val(row, candidates){
   const keys = Object.keys(row||{});
   for (const want of candidates){
@@ -220,10 +223,10 @@ function extractSkillsFromRow(row, namePrefix){
     const candLvKeys = [nk+" SL", nk+"SL", nk+"  SL", nk+" Lv", nk+"Lv", nk+" レベル"];
     let lv = 0;
     for (const lk of candLvKeys){
-      const hit = val(row, [lk]); // trim比較
+      const hit = val(row, [lk]);
       if (hit !== "") { lv = toInt(hit, 0); break; }
     }
-    if (lv <= 0) lv = 1; // フォールバック
+    if (lv <= 0) lv = 1;
     skills[skName] = (skills[skName] || 0) + lv;
   }
   return skills;
@@ -318,6 +321,8 @@ function buildSeriesIndex(ser){
 }
 
 /** ===================== 所持装飾品（在庫管理） ===================== **/
+let DecoCatalog=[];        // [{name, slot, skills}]
+let OwnedDecos = {};       // {name: count}
 function loadOwnedDecos(){
   try{ return JSON.parse(localStorage.getItem(LS_OWNED_DECOS) || "{}"); }catch{ return {}; }
 }
@@ -376,6 +381,10 @@ function importOwned(file){
 }
 
 /** ===================== コア計算 ===================== **/
+const PRIORITY_WEIGHT = {1:100, 2:10, 3:1};
+const skillRoster = {}; // {skillName: maxLv|null}
+let WIDX={}, AIDX={}, DIDX={}, SIDX={};
+
 function greedyPickArmor(partsIndex, targets, priority){
   const picked = [];
   for (const part of PART_ORDER){
@@ -488,35 +497,70 @@ function fillWithDecorationsOwned(slotPool, deficits, skill2decos, ownedMap){
   return { ok:true, assign, remain:slots, used };
 }
 
-/** ===================== 不足スキルの発生源ヒント ===================== **/
-function showDeficitHints(deficits){
-  const fb = document.getElementById("fallback");
-  const cont = document.createElement("div");
-  cont.innerHTML = `<div class="muted">不足スキルの発生源ヒント</div>`;
-  for (const [sk,need] of Object.entries(deficits)){
-    const hasDeco = !!DIDX[sk];
-    const tops = [];
-    for (const part of PART_ORDER){
-      const arr = (AIDX[part]||[])
-        .filter(p=> (p.skills[sk]||0)>0)
-        .sort((a,b)=> (b.skills[sk]||0) - (a.skills[sk]||0))
-        .slice(0,2);
-      arr.forEach(p=> tops.push(`${PART_JA[part]}:${p.name}(+${p.skills[sk]})`));
-    }
-    const d = document.createElement("div");
-    d.className="small";
-    d.textContent = `- ${sk}: 装飾品=${hasDeco?'あり':'なし'} ／ 代表防具: ${tops.slice(0,5).join(", ") || "該当なし"}`;
-    cont.appendChild(d);
+/** ===== 集計/表示：合計スキル＆オーバーフロー ===== **/
+function reduceAssignToSkill(assign){
+  const add = {};
+  for (const a of assign){ add[a.skill] = (add[a.skill]||0) + a.lv; }
+  return add;
+}
+function renderTotals(resultNode, targets, baseTotals, assignTotals){
+  const finalTotals = {...baseTotals};
+  for (const [k,v] of Object.entries(assignTotals)) finalTotals[k]=(finalTotals[k]||0)+v;
+
+  // 1) ターゲットの合計を要約
+  const sumBox = document.createElement("div");
+  sumBox.innerHTML = `<h3>合計スキル（ターゲット）</h3>`;
+  for (const sk of Object.keys(targets)){
+    const want = targets[sk];
+    const have = finalTotals[sk]||0;
+    const cap = skillRoster[sk] ?? null;
+    const extraVsTarget = have - want;
+    const overCap = (cap && have > cap) ? (have - cap) : 0;
+
+    const line = document.createElement("div");
+    line.className = "small mono";
+    let txt = `- ${sk}: 最終Lv${have} / 目標Lv${want}`;
+    if (cap) txt += ` / 最大Lv${cap}`;
+    if (extraVsTarget > 0) txt += `  <span class="overtarget">（目標比 +${extraVsTarget} 余剰）</span>`;
+    if (overCap > 0) txt += `  <span class="overcap">※最大超過 +${overCap}</span>`;
+    line.innerHTML = txt;
+    sumBox.appendChild(line);
   }
-  fb.appendChild(cont);
+  resultNode.appendChild(sumBox);
+
+  // 2) 全スキルの合計（折りたたみ）
+  const all = Object.entries(finalTotals).filter(([,v])=>v>0).sort((a,b)=> a[0].localeCompare(b[0]));
+  const details = document.createElement("details");
+  details.open = false;
+  details.innerHTML = `<summary class="small">全スキル合計（クリックで展開）</summary>`;
+  const tbl = document.createElement("table");
+  tbl.innerHTML = `<thead><tr>
+    <th>スキル</th><th>最終Lv</th><th>目標</th><th>最大Lv</th><th>余剰(目標比)</th><th>最大超過</th>
+  </tr></thead><tbody></tbody>`;
+  const tb = tbl.querySelector("tbody");
+  for (const [sk,lv] of all){
+    const want = targets[sk]||0;
+    const cap = skillRoster[sk] ?? null;
+    const extra = Math.max(0, lv - want);
+    const over = cap ? Math.max(0, lv - cap) : 0;
+    const tr = document.createElement("tr");
+    tr.innerHTML = `<td>${sk}</td>
+      <td class="mono">${lv}</td>
+      <td class="mono">${want||'-'}</td>
+      <td class="mono">${cap ?? '-'}</td>
+      <td class="mono ${extra>0?'overtarget':''}">${extra>0?`+${extra}`:'-'}</td>
+      <td class="mono ${over>0?'overcap':''}">${over>0?`+${over}`:'-'}</td>`;
+    tb.appendChild(tr);
+  }
+  details.appendChild(tbl);
+  resultNode.appendChild(details);
+
+  return finalTotals;
 }
 
 /** ===================== UI状態 ===================== **/
 const $ = (q)=>document.querySelector(q);
-const skillRoster = {};
-let WIDX={}, AIDX={}, DIDX={}, SIDX={};
-let DecoCatalog=[];        // [{name, slot, skills}]
-let OwnedDecos = {};       // {name: count}
+let DecoLoaded = false;
 const state = { picked:{}, priorities:{}, weapon:null };
 
 /** ===================== 初期化 ===================== **/
@@ -537,12 +581,12 @@ async function bootstrap(){
     await loadAndIndex(sheetIdInput.value.trim());
   };
 
-  // 所持装飾品の反映トグル
+  // 所持装飾品トグル
   const useOwned = $("#useOwned");
   useOwned.checked = localStorage.getItem(LS_USE_OWNED) === "1";
   useOwned.onchange = ()=> localStorage.setItem(LS_USE_OWNED, useOwned.checked ? "1" : "0");
 
-  // 所持装飾品のイベント
+  // 所持装飾品UI
   $("#ownedFilter").oninput = ()=> renderOwnedList();
   $("#resetOwned").onclick = ()=>{ if (confirm("所持数を全て0にします。よろしいですか？")) { OwnedDecos = {}; saveOwnedDecos(OwnedDecos); renderOwnedList(); } };
   $("#exportOwned").onclick = ()=> downloadText("owned_decorations.json", JSON.stringify(OwnedDecos, null, 2));
@@ -578,7 +622,7 @@ async function bootstrap(){
   // 実行
   $("#run").onclick = ()=> runSearch();
 
-  // 所持データをロード
+  // 所持データ
   OwnedDecos = loadOwnedDecos();
 
   // 初回ロード
@@ -607,7 +651,6 @@ async function loadAndIndex(sheetId){
     renderWeapons();
     renderOwnedList();
 
-    // 読み込みサマリ＋未知部位診断
     const cnt = {
       head: AIDX.head.length, chest: AIDX.chest.length, arms: AIDX.arms.length,
       waist: AIDX.waist.length, legs: AIDX.legs.length, unknown: AIDX._unknown.length
@@ -693,7 +736,7 @@ function runSearch(){
   // 5部位選択
   const picked = greedyPickArmor(AIDX, targets, prio);
 
-  // ====== 装備内訳テーブル ======
+  // 装備内訳テーブル
   const tbl = document.createElement("table");
   tbl.innerHTML = `<thead><tr>
     <th style="width:80px;">部位</th><th>装備名</th><th style="width:110px;">スロット</th><th>対象スキル寄与</th>
@@ -729,15 +772,15 @@ function runSearch(){
   res.appendChild(tbl);
 
   // 合算（素スキル+シリーズ）
-  const total = combineSkills([weaponSkills, ...picked.map(p=>p.skills)]);
+  const baseTotals = combineSkills([weaponSkills, ...picked.map(p=>p.skills)]);
   const series = computeSeriesSkills(SIDX, picked);
-  for (const [k,v] of Object.entries(series)) total[k]=(total[k]||0)+v;
+  for (const [k,v] of Object.entries(series)) baseTotals[k]=(baseTotals[k]||0)+v;
 
   // スロットプール
   const slotPool = buildSlotPool(state.weapon, weaponSlots, picked);
 
   // 差分
-  const deficits = diffTargets(targets, total);
+  const deficits = diffTargets(targets, baseTotals);
 
   // 装飾品で充足
   const useOwned = document.getElementById("useOwned").checked;
@@ -757,7 +800,6 @@ function runSearch(){
     res.appendChild(d);
   }
 
-  // 結果表示
   if (picked.length===0){
     const warn = document.createElement("div");
     warn.className="small error";
@@ -770,6 +812,7 @@ function runSearch(){
     ok.className="success"; ok.textContent="🎉 目標スキルを満たせました";
     res.appendChild(ok);
 
+    // 装飾品アサイン（出所まで）
     const assignDiv = document.createElement("div");
     assignDiv.innerHTML = `<div class="muted">装飾品アサイン（skill / deco / 部位・装備名 / slotサイズ / +lv）</div>`;
     for (const a of filled.assign){
@@ -791,13 +834,18 @@ function runSearch(){
       res.appendChild(u);
     }
 
+    // 合計＆オーバーフロー表示（成功時）
+    const assignTotals = reduceAssignToSkill(filled.assign);
+    renderTotals(res, targets, baseTotals, assignTotals);
+
+    // 追加盛り探索
     if (document.getElementById("optTryUpgrade").checked){
       const remain = filled.remain;
       const upDiv = document.createElement("div");
       upDiv.innerHTML = `<div class="muted">追加で盛れるか探索</div>`;
       let found = false;
       for (const sk of Object.keys(targets)){
-        const cur = (total[sk]||0) + filled.assign.filter(a=>a.skill===sk).reduce((s,a)=>s+a.lv,0);
+        const cur = (baseTotals[sk]||0) + (assignTotals[sk]||0);
         const mx  = (skillRoster[sk] || 10);
         if (cur < mx){
           const tryAdd = useOwned
@@ -841,6 +889,11 @@ function runSearch(){
       res.appendChild(u);
     }
 
+    // 合計＆オーバーフロー表示（未達でも現状を表示）
+    const assignTotals = reduceAssignToSkill(filled.assign);
+    renderTotals(res, targets, baseTotals, assignTotals);
+
+    // 妥協提案
     const lowable = Object.entries(prio).filter(([sk,p])=> p>=2 && deficits[sk]).map(([sk])=>sk);
     const w = document.createElement("div");
     w.innerHTML = `<div class="muted">⑥-1 提案：優先度2/3のスキルを下げると成立する可能性あり</div>
@@ -851,8 +904,6 @@ function runSearch(){
     t.className="small muted";
     t.textContent = "⑥-2 鑑定護石提案：シートが用意されていれば拡張可能（本MVPは省略）";
     fb.appendChild(t);
-
-    if (Object.keys(deficits).length) showDeficitHints(deficits);
   }
 }
 
