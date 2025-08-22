@@ -1,4 +1,4 @@
 import React from 'react';
 import { createRoot } from 'react-dom/client';
-import App from './pages/App';
-createRoot(document.getElementById('root')!).render(<App />);
+import MainView from './views/MainView';
+createRoot(document.getElementById('root')!).render(<MainView />);
