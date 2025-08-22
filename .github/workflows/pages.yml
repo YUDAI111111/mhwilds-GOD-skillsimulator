@@ -2,7 +2,7 @@ name: Deploy (GitHub Pages official)
 
 on:
   push:
-    branches: [ main, master ]
+    branches: [ main, master ]  # ← あなたのデフォルトブランチ名に合わせて
 
 permissions:
   contents: read
@@ -21,7 +21,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 20
-      - run: npm ci
+      - run: npm i --no-audit --no-fund      # ← ここを npm ci から変更
       - run: echo "VITE_BASE=/${{ github.event.repository.name }}/" >> $GITHUB_ENV
       - run: npm run build
       - uses: actions/upload-pages-artifact@v3
