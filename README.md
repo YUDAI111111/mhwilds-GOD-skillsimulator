@@ -8,6 +8,7 @@
 1. この一式をリポにアップ
 2. Settings → Pages → Source: **GitHub Actions**
 3. コミットすると `.github/workflows/pages.yml` が自動で実行 → 公開
+4. 
 
 ## ローカル開発
 ```bash
